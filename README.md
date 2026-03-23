@@ -72,6 +72,14 @@ liquifact-contracts/
 
 ---
 
+## Security & Authorization
+
+Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce authorization** via `require_auth()`. They rely solely on state-machine guards (e.g. checking if `status == 0` before funding).
+
+> **Warning:** This represents an authentication gap. Any caller can trigger these functions. Negative tests have been added to track this gap and ensure proper exceptions are thrown when the contract is in an invalid state.
+
+---
+
 ## CI/CD
 
 GitHub Actions runs on every push and pull request to `main`:
