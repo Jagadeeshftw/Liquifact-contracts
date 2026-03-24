@@ -70,20 +70,22 @@ liquifact-contracts/
 
 ### Escrow contract (high level)
 
-- **init** — Create an invoice escrow (admin, invoice id, SME address, amount, yield bps, maturity). Requires `admin` authorization.
+- **init** — Create an invoice escrow (admin, invoice id, SME address, buyer address, amount, yield bps, maturity). Requires `admin` authorization.
 - **get_escrow** — Read current escrow state (no auth required).
 - **fund** — Record investor funding; status becomes “funded” when target is met. Requires `investor` authorization.
-- **settle** — Mark escrow as settled (buyer paid; investors receive principal + yield). Requires `sme_address` authorization.
+- **confirm_payment** — Explicitly confirm that the buyer has paid the invoice. Required before settlement. Requires `buyer_address` authorization.
+- **settle** — Mark escrow as settled (investors receive principal + yield). Requires `sme_address` authorization and prior buyer confirmation.
 
 ### Authorization model
 
 All sensitive state transitions are protected by Soroban's native [`require_auth`](https://developers.stellar.org/docs/smart-contracts/example-contracts/auth) mechanism.
 
-| Function | Required Signer  | Rationale                                                  |
-|----------|------------------|------------------------------------------------------------|
-| `init`   | `admin`          | Prevents unauthorized escrow creation or re-initialization |
-| `fund`   | `investor`       | Each investor authorizes their own contribution            |
-| `settle` | `sme_address`    | Only the SME beneficiary may trigger settlement            |
+| Function          | Required Signer  | Rationale                                                  |
+|-------------------|------------------|------------------------------------------------------------|
+| `init`            | `admin`          | Prevents unauthorized escrow creation or re-initialization |
+| `fund`            | `investor`       | Each investor authorizes their own contribution            |
+| `confirm_payment` | `buyer_address`  | Only the buyer may confirm their own payment               |
+| `settle`          | `sme_address`    | Only the SME beneficiary may trigger settlement            |
 
 `require_auth` integrates with Soroban's authorization framework: on-chain, the transaction must carry a valid signature (or sub-invocation auth) from the required address. In tests, `env.mock_all_auths()` satisfies all checks so happy-path logic can be verified independently of key management.
 
@@ -91,7 +93,8 @@ All sensitive state transitions are protected by Soroban's native [`require_auth
 
 - The `admin` address is trusted to create legitimate escrows. Rotate or use a multisig address in production.
 - Re-initialization is blocked at the contract level (`"Escrow already initialized"` panic) regardless of who calls `init`.
-- `settle` can only move status from `1 → 2`; calling it on an open or already-settled escrow panics.
+- `confirm_payment` can only be called once the escrow is in the `funded` state.
+- `settle` can only move status from `1 → 2` and requires `is_paid` to be true. Calling it on an open, unconfirmed, or already-settled escrow panics.
 
 ---
 
@@ -109,6 +112,7 @@ The REST API surface is documented in [`docs/openapi.yaml`](docs/openapi.yaml) (
 | `GET` | `/v1/invoices/{invoiceId}` | JWT | Full escrow detail for one invoice |
 | `POST` | `/v1/escrow` | JWT | Initialise a new invoice escrow |
 | `POST` | `/v1/escrow/{invoiceId}/fund` | JWT | Record investor funding |
+| `POST` | `/v1/escrow/{invoiceId}/confirm` | JWT | Confirm buyer payment |
 | `POST` | `/v1/escrow/{invoiceId}/settle` | JWT | Settle a funded escrow |
 
 ### Security

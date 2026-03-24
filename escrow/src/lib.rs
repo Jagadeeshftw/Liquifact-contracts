@@ -1,16 +1,22 @@
 //! LiquiFact Escrow Contract
 //!
 //! Holds investor funds for an invoice until settlement.
-//! - SME receives stablecoin when funding target is met
-//! - Investors receive principal + yield when buyer pays at maturity
+//!
+//! ### Settlement Sequence
+//! 1. **Initialization**: Admin creates the escrow with `init`.
+//! 2. **Funding**: Investors contribute funds via `fund` until `funding_target` is met (status 0 -> 1).
+//! 3. **Payment Confirmation**: After buyer pays the SME off-chain (or via other means), the buyer
+//!    calls `confirm_payment` to acknowledge repayment.
+//! 4. **Settlement**: SME calls `settle` to finalize the escrow, moving it to status 2.
 //!
 //! # Authorization Boundaries
 //!
-//! | Function | Required Signer        | Reason                                      |
-//! |----------|------------------------|---------------------------------------------|
-//! | `init`   | `admin`                | Only the designated admin may create escrows |
-//! | `fund`   | `investor`             | Investor authorizes their own funding action |
-//! | `settle` | `sme_address`          | Only the SME (payee) may trigger settlement  |
+//! | Function          | Required Signer        | Reason                                      |
+//! |-------------------|------------------------|---------------------------------------------|
+//! | `init`            | `admin`                | Only the designated admin may create escrows |
+//! | `fund`            | `investor`             | Investor authorizes their own funding action |
+//! | `confirm_payment` | `buyer_address`        | Buyer confirms payment was made to SME      |
+//! | `settle`          | `sme_address`          | Only the SME (payee) may trigger settlement  |
 //!
 //! All auth checks are enforced via [`Address::require_auth`], which integrates
 //! with Soroban's native authorization framework and is verifiable on-chain.
@@ -26,6 +32,8 @@ pub struct InvoiceEscrow {
     pub admin: Address,
     /// SME wallet that receives liquidity and authorizes settlement
     pub sme_address: Address,
+    /// Buyer wallet that must confirm repayment before settlement
+    pub buyer_address: Address,
     /// Total amount in smallest unit (e.g. stroops for XLM)
     pub amount: i128,
     /// Funding target must be met to release to SME
@@ -38,6 +46,8 @@ pub struct InvoiceEscrow {
     pub maturity: u64,
     /// Escrow status: 0 = open, 1 = funded, 2 = settled
     pub status: u32,
+    /// Whether the buyer has confirmed payment (repayment of invoice)
+    pub is_paid: bool,
 }
 
 #[contract]
@@ -58,6 +68,7 @@ impl LiquifactEscrow {
         admin: Address,
         invoice_id: Symbol,
         sme_address: Address,
+        buyer_address: Address,
         amount: i128,
         yield_bps: i64,
         maturity: u64,
@@ -75,12 +86,14 @@ impl LiquifactEscrow {
             invoice_id: invoice_id.clone(),
             admin: admin.clone(),
             sme_address: sme_address.clone(),
+            buyer_address: buyer_address.clone(),
             amount,
             funding_target: amount,
             funded_amount: 0,
             yield_bps,
             maturity,
             status: 0, // open
+            is_paid: false,
         };
         env.storage()
             .instance()
@@ -120,7 +133,40 @@ impl LiquifactEscrow {
         escrow
     }
 
+    /// Explicitly confirm that the buyer has paid the invoice.
+    /// This step is required before the SME can settle the escrow.
+    ///
+    /// # Authorization
+    /// Requires authorization from the `buyer_address`.
+    ///
+    /// # Panics
+    /// - If the escrow is not in the funded (status = 1) state.
+    /// - If payment has already been confirmed.
+    pub fn confirm_payment(env: Env) -> InvoiceEscrow {
+        let mut escrow = Self::get_escrow(env.clone());
+
+        // Auth boundary: only the buyer may confirm their own payment.
+        escrow.buyer_address.require_auth();
+
+        assert!(
+            escrow.status == 1,
+            "Escrow must be funded before payment confirmation"
+        );
+        assert!(!escrow.is_paid, "Payment already confirmed");
+
+        escrow.is_paid = true;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("escrow"), &escrow);
+        escrow
+    }
+
     /// Mark escrow as settled (buyer paid). Releases principal + yield to investors.
+    ///
+    /// This is the final step in the escrow lifecycle. It requires that:
+    /// 1. The escrow is fully funded (status = 1).
+    /// 2. The buyer has explicitly confirmed payment via `confirm_payment`.
+    /// 3. The SME (payee) authorizes the settlement.
     ///
     /// # Authorization
     /// Requires authorization from the `sme_address` stored in the escrow.
@@ -129,6 +175,7 @@ impl LiquifactEscrow {
     ///
     /// # Panics
     /// - If the escrow is not in the funded (status = 1) state.
+    /// - If the buyer has not confirmed the payment yet.
     pub fn settle(env: Env) -> InvoiceEscrow {
         let mut escrow = Self::get_escrow(env.clone());
 
@@ -139,6 +186,11 @@ impl LiquifactEscrow {
             escrow.status == 1,
             "Escrow must be funded before settlement"
         );
+        assert!(
+            escrow.is_paid,
+            "Buyer must confirm payment before settlement"
+        );
+
         escrow.status = 2; // settled
         env.storage()
             .instance()
