@@ -1,110 +1,138 @@
-# LiquiFact Contracts
+# LiquiFact Escrow Contract – Threat Model & Security Notes
 
-Soroban smart contracts for **LiquiFact** — the global invoice liquidity network on Stellar. This repo contains the **escrow** contract that holds investor funds for tokenized invoices until settlement.
-
-Part of the LiquiFact stack: **frontend** (Next.js) | **backend** (Express) | **contracts** (this repo).
-
----
-
-## Prerequisites
-
-- **Rust** 1.70+ (stable)
-- **Soroban CLI** (optional, for deployment): [Stellar Soroban docs](https://developers.stellar.org/docs/smart-contracts/getting-started/soroban-cli)
-
-For CI and local checks you only need Rust and `cargo`.
+## Overview
+This contract manages invoice-backed escrow for SME financing:
+- Investors fund invoices
+- SME receives liquidity once funded
+- Investors are repaid at settlement
 
 ---
 
-## Setup
+## Threat Model
 
-1. **Clone the repo**
+### 1. Unauthorized Access
 
-   ```bash
-   git clone <this-repo-url>
-   cd liquifact-contracts
-   ```
+**Risk:**
+- Anyone can call `fund` or `settle`
 
-2. **Build**
+**Impact:**
+- Malicious settlement
+- Fake funding events
 
-   ```bash
-   cargo build
-   ```
+**Mitigation (Current):**
+- None (mock auth used in tests)
 
-3. **Run tests**
-
-   ```bash
-   cargo test
-   ```
+**Recommended Controls:**
+- Require auth:
+  - `fund`: investor must authorize
+  - `settle`: only trusted role (e.g. admin/oracle)
 
 ---
 
-## Development
+### 2. Arithmetic Risks (Overflow / Underflow)
 
-| Command           | Description                    |
-|-------------------|--------------------------------|
-| `cargo build`     | Build all contracts            |
-| `cargo test`      | Run unit tests                 |
-| `cargo fmt`       | Format code                    |
-| `cargo fmt -- --check` | Check formatting (used in CI) |
+**Risk:**
+- `funded_amount += amount` may overflow `i128`
 
----
+**Impact:**
+- Corrupted balances
+- Incorrect settlement state
 
-## Project structure
-
-```
-liquifact-contracts/
-├── Cargo.toml           # Workspace definition
-├── escrow/
-│   ├── Cargo.toml       # Escrow contract crate
-│   └── src/
-│       ├── lib.rs       # LiquiFact escrow contract (init, fund, settle)
-│       └── test.rs      # Unit tests
-└── .github/workflows/
-    └── ci.yml           # CI: fmt, build, test
-```
-
-### Escrow contract (high level)
-
-- **init** — Create an invoice escrow (invoice id, SME address, amount, yield bps, maturity).
-- **get_escrow** — Read current escrow state.
-- **fund** — Record investor funding; status becomes “funded” when target is met.
-- **settle** — Mark escrow as settled (buyer paid; investors receive principal + yield).
+**Mitigation (Added):**
+- Checked addition
 
 ---
 
-## CI/CD
+### 3. Replay / Double Execution
 
-GitHub Actions runs on every push and pull request to `main`:
+**Risk:**
+- `settle()` can be called repeatedly if state checks fail
+- `init()` overwrites existing escrow
 
-- **Format** — `cargo fmt --all -- --check`
-- **Build** — `cargo build`
-- **Tests** — `cargo test`
+**Impact:**
+- State corruption
+- Funds mis-accounting
 
-Keep formatting and tests passing before opening a PR.
-
----
-
-## Contributing
-
-1. **Fork** the repo and clone your fork.
-2. **Create a branch** from `main`: `git checkout -b feature/your-feature` or `fix/your-fix`.
-3. **Setup**: ensure Rust stable is installed; run `cargo build` and `cargo test`.
-4. **Make changes**:
-   - Follow existing patterns in `escrow/src/lib.rs`.
-   - Add or update tests in `escrow/src/test.rs`.
-   - Format with `cargo fmt`.
-5. **Verify locally**:
-   - `cargo fmt --all -- --check`
-   - `cargo build`
-   - `cargo test`
-6. **Commit** with clear messages (e.g. `feat(escrow): X`, `test(escrow): Y`).
-7. **Push** to your fork and open a **Pull Request** to `main`.
-8. Wait for CI and address review feedback.
-
-We welcome new contracts (e.g. settlement, tokenization helpers), tests, and docs that align with LiquiFact’s invoice financing flow.
+**Mitigation (Added):**
+- Status guards
+- Initialization guard
 
 ---
 
-## License
+### 4. Storage Corruption / Assumptions
 
-MIT (see root LiquiFact project for full license).
+**Risk:**
+- Single storage key (`escrow`)
+- New init overwrites old escrow
+
+**Impact:**
+- Loss of previous escrow data
+
+**Mitigation:**
+- Assumes **1 escrow per contract instance**
+
+**Recommended:**
+- Use `invoice_id` as storage key
+
+---
+
+### 5. Invalid Input / Economic Attacks
+
+**Risks:**
+- Negative funding
+- Zero funding
+- Invalid maturity
+
+**Mitigation (Added):**
+- Input validation assertions
+
+---
+
+### 6. Time-based Attacks
+
+**Risk:**
+- Settlement before maturity
+
+**Mitigation (Recommended):**
+- Enforce:
+
+env.ledger().timestamp() >= maturity
+
+
+---
+
+## Security Assumptions
+
+- Soroban runtime guarantees:
+- Deterministic execution
+- Storage integrity
+- Token transfers handled externally
+- Off-chain systems validate invoice authenticity
+
+---
+
+## Invariants
+
+- `funded_amount <= funding_target` (soft enforced)
+- `status transitions`: 0 → 1 → 2
+- Cannot settle before funded
+
+---
+
+## Test Coverage Notes
+
+Edge cases covered:
+- Funding beyond target
+- Double settlement prevention
+- Invalid initialization
+- Arithmetic safety
+
+---
+
+## Future Improvements
+
+- Multi-escrow support
+- Role-based access control
+- Token integration
+- Event emission
+- Formal verification

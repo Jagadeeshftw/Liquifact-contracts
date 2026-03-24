@@ -41,6 +41,16 @@ impl LiquifactEscrow {
         yield_bps: i64,
         maturity: u64,
     ) -> InvoiceEscrow {
+        // جلوگیری از overwrite (prevent re-initialization)
+        if env.storage().instance().has(&symbol_short!("escrow")) {
+            panic!("Escrow already initialized");
+        }
+
+        // Input validation
+        assert!(amount > 0, "Amount must be positive");
+        assert!(yield_bps >= 0, "Yield must be non-negative");
+        assert!(maturity > env.ledger().timestamp(), "Invalid maturity");
+
         let escrow = InvoiceEscrow {
             invoice_id: invoice_id.clone(),
             sme_address: sme_address.clone(),
@@ -51,9 +61,11 @@ impl LiquifactEscrow {
             maturity,
             status: 0, // open
         };
+
         env.storage()
             .instance()
             .set(&symbol_short!("escrow"), &escrow);
+
         escrow
     }
 
@@ -66,30 +78,56 @@ impl LiquifactEscrow {
     }
 
     /// Record investor funding. In production, this would be called with token transfer.
-    pub fn fund(env: Env, _investor: Address, amount: i128) -> InvoiceEscrow {
+    pub fn fund(env: Env, investor: Address, amount: i128) -> InvoiceEscrow {
+        // Authorization
+        investor.require_auth();
+
         let mut escrow = Self::get_escrow(env.clone());
+
+        // State + input validation
         assert!(escrow.status == 0, "Escrow not open for funding");
-        escrow.funded_amount += amount;
+        assert!(amount > 0, "Funding amount must be positive");
+
+        // Overflow-safe addition
+        escrow.funded_amount = escrow
+            .funded_amount
+            .checked_add(amount)
+            .expect("Overflow during funding");
+
+        // Transition state
         if escrow.funded_amount >= escrow.funding_target {
-            escrow.status = 1; // funded - ready to release to SME
+            escrow.status = 1; // funded
         }
+
         env.storage()
             .instance()
             .set(&symbol_short!("escrow"), &escrow);
+
         escrow
     }
 
     /// Mark escrow as settled (buyer paid). Releases principal + yield to investors.
     pub fn settle(env: Env) -> InvoiceEscrow {
         let mut escrow = Self::get_escrow(env.clone());
+
+        // Ensure proper state
         assert!(
             escrow.status == 1,
             "Escrow must be funded before settlement"
         );
+
+        // Optional: enforce maturity (recommended)
+        assert!(
+            env.ledger().timestamp() >= escrow.maturity,
+            "Cannot settle before maturity"
+        );
+
         escrow.status = 2; // settled
+
         env.storage()
             .instance()
             .set(&symbol_short!("escrow"), &escrow);
+
         escrow
     }
 }
