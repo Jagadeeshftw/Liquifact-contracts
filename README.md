@@ -1,44 +1,55 @@
-# LiquiFact Contracts
+# LiquiFact Escrow Contract – Threat Model & Security Notes
 
-Soroban smart contracts for **LiquiFact** — the global invoice liquidity network on Stellar. This repo contains the **escrow** contract that holds investor funds for tokenized invoices until settlement.
-
-Part of the LiquiFact stack: **frontend** (Next.js) | **backend** (Express) | **contracts** (this repo).
-
----
-
-## Prerequisites
-
-- **Rust** 1.70+ (stable)
-- **Soroban CLI** (optional, for deployment): [Stellar Soroban docs](https://developers.stellar.org/docs/smart-contracts/getting-started/soroban-cli)
-
-For CI and local checks you only need Rust and `cargo`.
+Soroban smart contracts for **LiquiFact** — the global invoice liquidity network on Stellar.
+This repo contains the **escrow** contract that holds investor funds for tokenized invoices until settlement.
 
 ---
 
-## Setup
+## Threat Model
 
-1. **Clone the repo**
+### 1. Unauthorized Access
 
-   ```bash
-   git clone <this-repo-url>
-   cd liquifact-contracts
-   ```
+**Risk:**
+- Anyone can call `fund` or `settle`
 
-2. **Build**
+**Impact:**
+- Malicious settlement
+- Fake funding events
 
-   ```bash
-   cargo build
-   ```
+**Mitigation (Current):**
+- None (mock auth used in tests)
 
-3. **Run tests**
-
-   ```bash
-   cargo test
-   ```
+**Recommended Controls:**
+- Require auth:
+  - `fund`: investor must authorize
+  - `settle`: only trusted role (e.g. admin/oracle)
 
 ---
 
-## Development
+### 2. Arithmetic Risks (Overflow / Underflow)
+
+**Risk:**
+- `funded_amount += amount` may overflow `i128`
+
+---
+
+### 3. Replay / Double Execution
+
+```bash
+git clone <this-repo-url>
+cd liquifact-contracts
+cargo build
+cargo test
+```
+
+---
+
+### 5. Invalid Input / Economic Attacks
+
+**Risks:**
+- Negative funding
+- Zero funding
+- Invalid maturity
 
 | Command                    | Description                   |
 |----------------------------|-------------------------------|
@@ -49,15 +60,17 @@ For CI and local checks you only need Rust and `cargo`.
 
 ---
 
-## Project structure
+### 6. Time-based Attacks
 
-```
+```text
 liquifact-contracts/
-├── Cargo.toml           # Workspace definition
+├── Cargo.toml              # Workspace definition
+├── docs/
+│   └── EVENT_SCHEMA.md    # Indexer-friendly event schema reference
 ├── escrow/
-│   ├── Cargo.toml       # Escrow contract crate
+│   ├── Cargo.toml          # Escrow contract crate
 │   └── src/
-│       ├── lib.rs       # LiquiFact escrow contract (init, fund, settle)
+│       ├── lib.rs       # LiquiFact escrow contract (init, fund, settle, migrate)
 │       └── test.rs      # Unit tests
 ├── docs/
 │   ├── openapi.yaml     # OpenAPI 3.1 specification
@@ -65,10 +78,21 @@ liquifact-contracts/
 │   └── tests/
 │       └── openapi.test.js  # Schema conformance tests (51 cases)
 └── .github/workflows/
-    └── ci.yml           # CI: fmt, build, test
+    └── ci.yml              # CI: fmt, build, test
 ```
 
-### Escrow contract (high level)
+Records an investor contribution. Transitions to `status = 1` when
+`funded_amount >= funding_target`.
+
+> **Production note:** Must be called atomically with a SEP-41 token `transfer`
+> from `investor` to the contract address. This version records accounting only.
+
+**Parameters**
+
+| Parameter   | Constraints                                  |
+|-------------|----------------------------------------------|
+| `_investor` | Investor's Stellar address (for audit trail) |
+| `amount`    | > 0 recommended; partial funding is allowed  |
 
 - **init** — Create an invoice escrow (invoice id, SME address, amount, yield bps, maturity). Emits `init` event.
 - **get_escrow** — Read current escrow state.
@@ -89,12 +113,52 @@ All payload types (`InitEvent`, `FundEvent`, `SettleEvent`) are exported `#[cont
 
 The `invoice_id` in the topic allows indexers to filter events by invoice without decoding the payload.
 
+The contract rejects `migrate` calls that:
+- Pass a `from_version` that does not match the stored version (prevents accidental double-migration).
+- Pass a `from_version >= SCHEMA_VERSION` (already up to date).
+
+### Security notes
+
+- **Re-initialization guard** — `init` panics if the escrow is already initialized, preventing state overwrite.
+- **`migrate` must be admin-gated in production** — the current implementation is open for testability. Before mainnet deployment, add `admin_address.require_auth()` at the top of `migrate` so only the contract deployer can trigger upgrades.
+- **No silent data loss** — migration arms must explicitly handle every field. Defaulting a field to zero/false is intentional and must be documented in the version history table above.
+- **Immutable history** — old migration arms should never be removed; they ensure any instance at any historical version can be brought forward step-by-step.
+
 ---
 
-## CI/CD
+## Security & Authorization
 
-GitHub Actions runs on every push and pull request to `main`:
+Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce authorization** via `require_auth()`. They rely solely on state-machine guards (e.g. checking if `status == 0` before funding).
 
+> **Warning:** This represents an authentication gap. Any caller can trigger these functions. Negative tests have been added to track this gap and ensure proper exceptions are thrown when the contract is in an invalid state.
+
+---
+
+
+## Funding Constraints
+- **Minimum Funding:** All funding amounts must be strictly greater than zero ($> 0$). 
+- **Initialization:** Escrow creation will fail if the target amount is not positive.
+- **Integer Safety:** Uses `checked_add` to prevent overflow during funded amount accounting.
+
+---
+
+## Security Assumptions
+
+- Soroban runtime guarantees:
+- Deterministic execution
+- Storage integrity
+- Token transfers handled externally
+- Off-chain systems validate invoice authenticity
+
+---
+
+---
+
+## Invariants
+
+- `funded_amount <= funding_target` (soft enforced)
+- `status transitions`: 0 → 1 → 2
+- Cannot settle before funded
 | Step | Command | Fails if… |
 |------|---------|-----------|
 | Format | `cargo fmt --all -- --check` | any file is not formatted |
@@ -133,7 +197,7 @@ Keep formatting, tests, and coverage passing before opening a PR.
 5. **Verify locally**:
    - `cargo fmt --all -- --check`
    - `cargo build`
-   - `cargo test`
+   - `cargo test --features testutils`
 6. **Commit** with clear messages (e.g. `feat(escrow): X`, `test(escrow): Y`).
 7. **Push** to your fork and open a **Pull Request** to `main`.
 8. Wait for CI and address review feedback.
@@ -142,6 +206,10 @@ We welcome new contracts (e.g. settlement, tokenization helpers), tests, and doc
 
 ---
 
-## License
+## Future Improvements
 
-MIT (see root LiquiFact project for full license).
+- Multi-escrow support
+- Role-based access control
+- Token integration
+- Event emission
+- Formal verification
