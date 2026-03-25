@@ -287,6 +287,9 @@ fn test_fund_with_zero_fails() {
         &1000u64,
         &test_hash(&env),
     );
+    client.fund(&investor, &1_000i128); // reaches funded status
+    client.fund(&investor, &1i128); // must panic
+}
 
     let e1 = client.fund(&investor, &10_000_0000000i128);
     assert_eq!(e1.funded_amount, 10_000_0000000i128);
