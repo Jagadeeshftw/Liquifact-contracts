@@ -634,6 +634,7 @@ fn test_fund_does_not_enforce_investor_auth() {
     let contract_id = env.register(LiquifactEscrow, ());
     let client = LiquifactEscrowClient::new(&env, &contract_id);
 
+    let admin = Address::generate(&env);
     let sme = Address::generate(&env);
     let investor = Address::generate(&env);
 
@@ -962,6 +963,7 @@ fn test_settle_not_funded() {
     let env = Env::default();
     env.mock_all_auths();
 
+    let admin = Address::generate(&env);
     let sme = Address::generate(&env);
     let admin = Address::generate(&env);
     let contract_id = env.register(LiquifactEscrow, ());
@@ -1154,4 +1156,58 @@ fn test_read_only_methods_unaffected_by_pause() {
     let escrow = default_escrow();
     let read = EscrowContract::get_escrow(&escrow);
     assert_eq!(read.invoice_id, 42);
+}
+
+/// Edge Case: Partial fund then full fund leads to funded
+#[test]
+fn test_transition_partial_then_full_funded() {
+    let (env, client, admin, sme) = setup();
+    let investor = Address::generate(&env);
+
+    client.init(&admin, &symbol_short!("TX011"), &sme, &1000i128, &500i64, &2000u64);
+    assert_eq!(client.get_escrow().status, 0);
+
+    let escrow = client.fund(&investor, &500i128); // partial
+    assert_eq!(escrow.status, 0); // still open
+    assert_eq!(escrow.funded_amount, 500i128);
+
+    let escrow = client.fund(&investor, &500i128); // complete funding
+    assert_eq!(escrow.status, 1); // funded
+}
+
+/// Edge Case: Multiple partial funds without reaching target
+#[test]
+fn test_transition_multiple_partial_funds() {
+    let (env, client, admin, sme) = setup();
+    let investor1 = Address::generate(&env);
+    let investor2 = Address::generate(&env);
+
+    client.init(&admin, &symbol_short!("TX012"), &sme, &1000i128, &500i64, &2000u64);
+
+    client.fund(&investor1, &300i128); // status = 0 (open)
+    let escrow = client.fund(&investor2, &300i128); // still open, 600 funded
+    assert_eq!(escrow.status, 0);
+    assert_eq!(escrow.funded_amount, 600i128);
+
+    client.fund(&investor1, &400i128); // now 1000 reached -> funded
+    assert_eq!(client.get_escrow().status, 1);
+}
+
+/// Security: Verify status values are exactly as defined in matrix
+#[test]
+fn test_state_values_are_correct() {
+    let (env, client, admin, sme) = setup();
+    let investor = Address::generate(&env);
+
+    client.init(&admin, &symbol_short!("TX013"), &sme, &1000i128, &500i64, &2000u64);
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 0, "Init should set status to Open (0)");
+
+    client.fund(&investor, &1000i128);
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 1, "Full funding should set status to Funded (1)");
+
+    client.settle();
+    let escrow = client.get_escrow();
+    assert_eq!(escrow.status, 2, "Settle should set status to Settled (2)");
 }
