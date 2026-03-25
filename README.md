@@ -1,20 +1,39 @@
-# LiquiFact Contracts
+# LiquiFact Escrow Contract – Threat Model & Security Notes
 
 Soroban smart contracts for **LiquiFact** — the global invoice liquidity network on Stellar.
 This repo contains the **escrow** contract that holds investor funds for tokenized invoices until settlement.
 
-Part of the LiquiFact stack: **frontend** (Next.js) | **backend** (Express) | **contracts** (this repo).
+---
+
+## Threat Model
+
+### 1. Unauthorized Access
+
+**Risk:**
+- Anyone can call `fund` or `settle`
+
+**Impact:**
+- Malicious settlement
+- Fake funding events
+
+**Mitigation (Current):**
+- None (mock auth used in tests)
+
+**Recommended Controls:**
+- Require auth:
+  - `fund`: investor must authorize
+  - `settle`: only trusted role (e.g. admin/oracle)
 
 ---
 
-## Prerequisites
+### 2. Arithmetic Risks (Overflow / Underflow)
 
-- **Rust** 1.70+ (stable)
-- **Soroban CLI** (optional, for deployment): [Stellar Soroban docs](https://developers.stellar.org/docs/smart-contracts/getting-started/soroban-cli)
+**Risk:**
+- `funded_amount += amount` may overflow `i128`
 
 ---
 
-## Setup
+### 3. Replay / Double Execution
 
 ```bash
 git clone <this-repo-url>
@@ -25,7 +44,12 @@ cargo test
 
 ---
 
-## Development
+### 5. Invalid Input / Economic Attacks
+
+**Risks:**
+- Negative funding
+- Zero funding
+- Invalid maturity
 
 | Command                | Description                                                |
 |------------------------|------------------------------------------------------------|
@@ -36,7 +60,7 @@ cargo test
 
 ---
 
-## Project structure
+### 6. Time-based Attacks
 
 ```text
 liquifact-contracts/
@@ -172,9 +196,15 @@ Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce auth
 
 ---
 
-## CI/CD
+## Security Assumptions
 
-GitHub Actions runs on every push and pull request to `main`:
+- Soroban runtime guarantees:
+- Deterministic execution
+- Storage integrity
+- Token transfers handled externally
+- Off-chain systems validate invoice authenticity
+
+---
 
 | Step | Command | Fails if… |
 |------|---------|-----------|
@@ -223,6 +253,10 @@ We welcome new contracts (e.g. settlement, tokenization helpers), tests, and doc
 
 ---
 
-## License
+## Future Improvements
 
-MIT (see root LiquiFact project for full license).
+- Multi-escrow support
+- Role-based access control
+- Token integration
+- Event emission
+- Formal verification

@@ -247,6 +247,7 @@ impl LiquifactEscrow {
             status: 0, // open
             version: SCHEMA_VERSION,
         };
+
         env.storage()
             .instance()
             .set(&symbol_short!("escrow"), &escrow);
