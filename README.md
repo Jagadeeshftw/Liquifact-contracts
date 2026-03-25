@@ -40,18 +40,18 @@ For CI and local checks you only need Rust and `cargo`.
 
 ## Development
 
-| Command           | Description                    |
-|-------------------|--------------------------------|
-| `cargo build`     | Build all contracts            |
-| `cargo test`      | Run unit tests                 |
-| `cargo fmt`       | Format code                    |
-| `cargo fmt -- --check` | Check formatting (used in CI) |
+| Command                | Description                                                |
+|------------------------|------------------------------------------------------------|
+| `cargo build`          | Build all contracts                                        |
+| `cargo test`           | Run unit tests and property-based tests (using `proptest`) |
+| `cargo fmt`            | Format code                                                |
+| `cargo fmt -- --check` | Check formatting (used in CI)                              |
 
 ---
 
 ## Project structure
 
-```
+```text
 liquifact-contracts/
 ├── Cargo.toml              # Workspace definition
 ├── docs/
@@ -59,45 +59,98 @@ liquifact-contracts/
 ├── escrow/
 │   ├── Cargo.toml          # Escrow contract crate
 │   └── src/
-│       ├── lib.rs          # LiquiFact escrow contract (init, fund, settle)
-│       └── test.rs         # Unit tests (lifecycle, events, edge cases)
+│       ├── lib.rs       # LiquiFact escrow contract (init, fund, settle, migrate)
+│       └── test.rs      # Unit tests
+├── docs/
+│   ├── openapi.yaml     # OpenAPI 3.1 specification
+│   ├── package.json     # Test runner deps (AJV, js-yaml)
+│   └── tests/
+│       └── openapi.test.js  # Schema conformance tests (51 cases)
 └── .github/workflows/
     └── ci.yml              # CI: fmt, build, test
 ```
 
 ### Escrow contract (high level)
 
-| Function | Description |
-|---|---|
-| `init` | Create an invoice escrow (invoice id, SME address, amount, yield bps, maturity). |
-| `get_escrow` | Read current escrow state (read-only, no event). |
-| `fund` | Record investor funding; status becomes **funded** when target is met. |
-| `settle` | Mark escrow as settled (buyer paid; investors receive principal + yield). |
-
-**Status codes**
-
-| Value | Name | Meaning |
-|---|---|---|
-| `0` | open | Accepting investor funding |
-| `1` | funded | Target met; SME can be paid; awaiting buyer settlement |
-| `2` | settled | Buyer paid; investors can redeem principal + yield |
+- **init** — Create an invoice escrow (invoice id, SME address, admin address, amount, yield bps, maturity).
+- **get_escrow** — Read current escrow state.
+- **get_version** — Return the stored schema version number.
+- **fund** — Record investor funding; status becomes "funded" when target is met.
+- **settle** — Mark escrow as settled (buyer paid; investors receive principal + yield).
+- **migrate** — Upgrade storage from an older schema version to the current one (see below).
 
 ---
 
-## Events
+## Contract migration strategy
 
-Every state-changing function emits a structured Soroban contract event so
-backend indexers and analytics services can reconstruct contract history
-directly from ledger meta.
+### Overview
 
-| Function | Topic[0] | Topic[1] | Payload |
-|---|---|---|---|
-| `init` | `"escrow"` | `"initd"` | `InvoiceEscrow` (full snapshot) |
-| `fund` | `"escrow"` | `"funded"` | `FundedPayload` (investor, amount, running totals) |
-| `settle` | `"escrow"` | `"settled"` | `SettledPayload` (funded_amount, yield_bps, maturity) |
+The escrow contract stores its state as a single [`InvoiceEscrow`](escrow/src/lib.rs) struct under the instance storage key `"escrow"`, alongside a `"version"` key that holds the current schema version (`u32`).
 
-For full field descriptions, payload examples, XDR topic filters, and the
-versioning strategy see **[docs/EVENT_SCHEMA.md](docs/EVENT_SCHEMA.md)**.
+Any change to the struct layout (adding, removing, or retyping a field) is a **breaking schema change** and requires a version bump and a migration path.
+
+### Version history
+
+| Version | Description |
+|---------|-------------|
+| 1       | Initial schema — `invoice_id`, `sme_address`, `amount`, `funding_target`, `funded_amount`, `yield_bps`, `maturity`, `status`, `version` |
+
+### How versioning works
+
+- `SCHEMA_VERSION` in `lib.rs` is the source of truth for the current schema.
+- Every `init` call writes `SCHEMA_VERSION` into both the struct's `version` field and the `"version"` storage key.
+- `get_version()` lets off-chain tooling (indexers, upgrade scripts) read the stored version before deciding whether to call `migrate`.
+
+### Adding a new schema version (step-by-step)
+
+1. **Bump `SCHEMA_VERSION`** in `lib.rs` (e.g. `1` to `2`).
+2. **Keep the old struct** — add a `legacy` module (or a type alias like `InvoiceEscrowV1`) so the old bytes can still be deserialized.
+3. **Add a migration arm** in `LiquifactEscrow::migrate`:
+   ```rust
+   if from_version == 1 {
+       let old: InvoiceEscrowV1 = env.storage().instance()
+           .get(&symbol_short!("escrow")).unwrap();
+       let new = InvoiceEscrow {
+           // spread old fields, default new ones
+           new_field: default_value,
+           version: 2,
+           ..old.into()
+       };
+       env.storage().instance().set(&symbol_short!("escrow"), &new);
+       env.storage().instance().set(&symbol_short!("version"), &2u32);
+   }
+   ```
+4. **Write a test** in `test.rs` that manually writes the old struct bytes into storage and asserts the migrated state is correct.
+5. **Gate `migrate` behind admin auth** before deploying to production (see security notes below).
+
+### Deployment upgrade flow
+
+```
+1. Deploy new WASM (bump SCHEMA_VERSION, add migration arm)
+2. Call get_version()  ->  confirm stored version == N
+3. Call migrate(N)     ->  storage upgraded to N+1
+4. Call get_version()  ->  confirm stored version == N+1
+5. Resume normal operations
+```
+
+The contract rejects `migrate` calls that:
+- Pass a `from_version` that does not match the stored version (prevents accidental double-migration).
+- Pass a `from_version >= SCHEMA_VERSION` (already up to date).
+
+### Security notes
+
+- **Re-initialization guard** — `init` panics if the escrow is already initialized, preventing state overwrite.
+- **`migrate` must be admin-gated in production** — the current implementation is open for testability. Before mainnet deployment, add `admin_address.require_auth()` at the top of `migrate` so only the contract deployer can trigger upgrades.
+- **No silent data loss** — migration arms must explicitly handle every field. Defaulting a field to zero/false is intentional and must be documented in the version history table above.
+- **Immutable history** — old migration arms should never be removed; they ensure any instance at any historical version can be brought forward step-by-step.
+
+---
+
+## Security & Authorization
+
+Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce authorization** via `require_auth()`. They rely solely on state-machine guards (e.g. checking if `status == 0` before funding).
+
+> **Warning:** This represents an authentication gap. Any caller can trigger these functions. Negative tests have been added to track this gap and ensure proper exceptions are thrown when the contract is in an invalid state.
 
 ---
 
@@ -105,11 +158,29 @@ versioning strategy see **[docs/EVENT_SCHEMA.md](docs/EVENT_SCHEMA.md)**.
 
 GitHub Actions runs on every push and pull request to `main`:
 
-- **Format** — `cargo fmt --all -- --check`
-- **Build** — `cargo build`
-- **Tests** — `cargo test`
+| Step | Command | Fails if… |
+|------|---------|-----------|
+| Format | `cargo fmt --all -- --check` | any file is not formatted |
+| Build | `cargo build` | compilation error |
+| Tests | `cargo test` | any test fails |
+| Coverage | `cargo llvm-cov --features testutils --fail-under-lines 95` | line coverage < 95 % |
 
-Keep formatting and tests passing before opening a PR.
+### Coverage gate
+
+The pipeline uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (installed via `taiki-e/install-action`) to measure line coverage and hard-fail the job when it drops below **95 %**.
+
+To run the coverage check locally:
+
+```bash
+# Install once
+cargo install cargo-llvm-cov
+
+# Run (requires llvm-tools-preview component)
+rustup component add llvm-tools-preview
+cargo llvm-cov --features testutils --fail-under-lines 95 --summary-only
+```
+
+Keep formatting, tests, and coverage passing before opening a PR.
 
 ---
 
@@ -130,7 +201,7 @@ Keep formatting and tests passing before opening a PR.
 7. **Push** to your fork and open a **Pull Request** to `main`.
 8. Wait for CI and address review feedback.
 
-We welcome new contracts (e.g. settlement, tokenization helpers), tests, and docs that align with LiquiFact’s invoice financing flow.
+We welcome new contracts (e.g. settlement, tokenization helpers), tests, and docs that align with LiquiFact's invoice financing flow.
 
 ---
 
