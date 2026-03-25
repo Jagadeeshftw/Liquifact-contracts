@@ -164,10 +164,7 @@ impl LiquifactEscrow {
 
     /// Returns the stored schema version.
     pub fn get_version(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::Version)
-            .unwrap_or(0)
+        env.storage().instance().get(&DataKey::Version).unwrap_or(0)
     }
 
     /// Returns the contribution amount for a given investor.
@@ -182,11 +179,7 @@ impl LiquifactEscrow {
 
     /// Migrate storage from an older schema version to the current one.
     pub fn migrate(env: Env, from_version: u32) -> u32 {
-        let stored: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Version)
-            .unwrap_or(0);
+        let stored: u32 = env.storage().instance().get(&DataKey::Version).unwrap_or(0);
 
         assert!(
             stored == from_version,
@@ -229,9 +222,10 @@ impl LiquifactEscrow {
             .instance()
             .get(&DataKey::InvestorContribution(investor.clone()))
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::InvestorContribution(investor.clone()), &(prev + amount));
+        env.storage().instance().set(
+            &DataKey::InvestorContribution(investor.clone()),
+            &(prev + amount),
+        );
 
         env.storage().instance().set(&DataKey::Escrow, &escrow);
 
@@ -340,7 +334,10 @@ impl LiquifactEscrow {
             escrow.status == 1,
             "Escrow must be funded before withdrawal"
         );
-        assert!(escrow.funded_amount > 0, "No funds available for withdrawal");
+        assert!(
+            escrow.funded_amount > 0,
+            "No funds available for withdrawal"
+        );
 
         let withdrawal_amount = escrow.funded_amount;
         escrow.status = 3;

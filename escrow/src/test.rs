@@ -480,7 +480,10 @@ fn test_settle_at_timestamp_zero_before_maturity_panics() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.settle();
     }));
-    assert!(result.is_err(), "Expected panic when settling before maturity");
+    assert!(
+        result.is_err(),
+        "Expected panic when settling before maturity"
+    );
 }
 
 // ── update_maturity ───────────────────────────────────────────────────────────
