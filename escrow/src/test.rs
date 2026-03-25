@@ -1,5 +1,6 @@
 use super::{LiquifactEscrow, LiquifactEscrowClient, SCHEMA_VERSION};
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env};
+//
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -263,4 +264,228 @@ fn test_migrate_wrong_from_version_panics() {
 
     default_init(&client, &admin, &sme);
     client.migrate(&99u32);
+}
+
+use proptest::prelude::*;
+
+proptest! {
+    // Escrow Property Invariants
+
+    #[test]
+    fn prop_funded_amount_non_decreasing(
+        amount1 in 0..10_000_0000000i128,
+        amount2 in 0..10_000_0000000i128
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let sme = Address::generate(&env);
+        let investor1 = Address::generate(&env);
+        let investor2 = Address::generate(&env);
+
+        let contract_id = env.register(LiquifactEscrow, ());
+        let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+        let target_amount = 20_000_0000000i128;
+
+        client.init(
+            &symbol_short!("INVTST"),
+            &sme,
+            &target_amount,
+            &800i64,
+            &1000u64,
+        );
+
+        // First funding
+        let pre_funding_amount = client.get_escrow().funded_amount;
+        client.fund(&investor1, &amount1);
+        let post_funding1 = client.get_escrow().funded_amount;
+
+        // Invariant: Funding amount acts monotonically
+        assert!(post_funding1 >= pre_funding_amount, "Funded amount should be non-decreasing");
+
+        // Skip second funding if status already flipped
+        if client.get_escrow().status == 0 {
+            client.fund(&investor2, &amount2);
+            let post_funding2 = client.get_escrow().funded_amount;
+            assert!(post_funding2 >= post_funding1, "Funded amount should be non-decreasing on successive funds");
+        }
+    }
+
+    #[test]
+    fn prop_bounded_status_transitions(
+        amount in 0..50_000_0000000i128,
+        target_amount in 100..10000_000000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let sme = Address::generate(&env);
+        let investor = Address::generate(&env);
+
+        let contract_id = env.register(LiquifactEscrow, ());
+        let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+        let escrow = client.init(
+            &symbol_short!("INVSTA"),
+            &sme,
+            &target_amount,
+            &800i64,
+            &1000u64,
+        );
+
+        // Initial status is 0
+        assert_eq!(escrow.status, 0);
+
+        // Status bounds check
+        assert!(escrow.status <= 2);
+
+        let funded_escrow = client.fund(&investor, &amount);
+
+        // Mid-status bounds check
+        assert!(funded_escrow.status <= 2);
+
+        // Ensure status 1 is reached ONLY if target met
+        if amount >= target_amount {
+            assert_eq!(funded_escrow.status, 1);
+
+            // Only funded escrows can be settled
+            let settled_escrow = client.settle();
+            assert_eq!(settled_escrow.status, 2);
+        } else {
+            // Unfunded remains 0
+            assert_eq!(funded_escrow.status, 0);
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "Escrow not initialized")]
+fn test_fund_fails_when_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let investor = Address::generate(&env);
+    client.fund(&investor, &1000);
+}
+
+#[test]
+#[should_panic(expected = "Escrow not initialized")]
+fn test_settle_fails_when_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    client.settle();
+}
+
+#[test]
+#[should_panic(expected = "Escrow must be funded before settlement")]
+fn test_settle_fails_when_not_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme = Address::generate(&env);
+    client.init(&symbol_short!("INV001"), &sme, &1000, &800, &1000);
+    client.settle();
+}
+
+#[test]
+#[should_panic(expected = "Escrow not open for funding")]
+fn test_fund_fails_when_already_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.init(&symbol_short!("INV001"), &sme, &1000, &800, &1000);
+    client.fund(&investor, &1000);
+    // Escrow is now funded status = 1.
+    client.fund(&investor, &500); // Should panic
+}
+
+#[test]
+#[should_panic(expected = "Escrow must be funded before settlement")]
+fn test_settle_fails_when_already_settled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.init(&symbol_short!("INV001"), &sme, &1000, &800, &1000);
+    client.fund(&investor, &1000);
+    client.settle();
+
+    // Already settled status = 2, status != 1 so expect panic
+    client.settle();
+}
+
+#[test]
+fn test_fund_does_not_enforce_investor_auth() {
+    let env = Env::default();
+    // SECURITY: We do not call env.mock_all_auths() here to prove that
+    // the contract does *not* enforce require_auth() on the investor.
+    // If it did, this test would fail because there are no mocked auths.
+
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.init(&symbol_short!("INV001"), &sme, &1000, &800, &1000);
+    let escrow = client.fund(&investor, &1000);
+
+    assert_eq!(escrow.funded_amount, 1000);
+    assert_eq!(escrow.status, 1);
+}
+
+#[test]
+fn test_settle_does_not_enforce_auth() {
+    let env = Env::default();
+    // SECURITY: Proves settle can be called by anyone without require_auth().
+
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.init(&symbol_short!("INV001"), &sme, &1000, &800, &1000);
+    client.fund(&investor, &1000);
+    let escrow = client.settle();
+
+    assert_eq!(escrow.status, 2);
+}
+
+#[test]
+fn test_reinit_overwrites_escrow() {
+    let env = Env::default();
+    // SECURITY: Show that init can be called again by anyone to overwrite the escrow.
+    env.mock_all_auths();
+
+    let contract_id = env.register(LiquifactEscrow, ());
+    let client = LiquifactEscrowClient::new(&env, &contract_id);
+
+    let sme1 = Address::generate(&env);
+    let sme2 = Address::generate(&env);
+
+    client.init(&symbol_short!("INV001"), &sme1, &1000, &800, &1000);
+    let escrow1 = client.get_escrow();
+    assert_eq!(escrow1.sme_address, sme1);
+
+    // Someone else overwrites it
+    client.init(&symbol_short!("ATTACK"), &sme2, &9999, &999, &9999);
+    let escrow2 = client.get_escrow();
+    assert_eq!(escrow2.sme_address, sme2);
+    assert_eq!(escrow2.invoice_id, symbol_short!("ATTACK"));
 }

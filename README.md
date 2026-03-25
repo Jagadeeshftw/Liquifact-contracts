@@ -40,18 +40,18 @@ For CI and local checks you only need Rust and `cargo`.
 
 ## Development
 
-| Command                    | Description                   |
-|----------------------------|-------------------------------|
-| `cargo build`              | Build all contracts           |
-| `cargo test`               | Run unit tests                |
-| `cargo fmt`                | Format code                   |
-| `cargo fmt -- --check`     | Check formatting (used in CI) |
+| Command                | Description                                                |
+|------------------------|------------------------------------------------------------|
+| `cargo build`          | Build all contracts                                        |
+| `cargo test`           | Run unit tests and property-based tests (using `proptest`) |
+| `cargo fmt`            | Format code                                                |
+| `cargo fmt -- --check` | Check formatting (used in CI)                              |
 
 ---
 
 ## Project structure
 
-```
+```text
 liquifact-contracts/
 ├── Cargo.toml           # Workspace definition
 ├── escrow/
@@ -141,6 +141,14 @@ The contract rejects `migrate` calls that:
 - **`migrate` must be admin-gated in production** — the current implementation is open for testability. Before mainnet deployment, add `admin_address.require_auth()` at the top of `migrate` so only the contract deployer can trigger upgrades.
 - **No silent data loss** — migration arms must explicitly handle every field. Defaulting a field to zero/false is intentional and must be documented in the version history table above.
 - **Immutable history** — old migration arms should never be removed; they ensure any instance at any historical version can be brought forward step-by-step.
+
+---
+
+## Security & Authorization
+
+Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce authorization** via `require_auth()`. They rely solely on state-machine guards (e.g. checking if `status == 0` before funding).
+
+> **Warning:** This represents an authentication gap. Any caller can trigger these functions. Negative tests have been added to track this gap and ensure proper exceptions are thrown when the contract is in an invalid state.
 
 ---
 
