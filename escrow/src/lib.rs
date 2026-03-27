@@ -45,8 +45,6 @@ pub struct InvoiceEscrow {
     pub admin: Address,
     /// SME wallet that receives liquidity and authorizes settlement
     pub sme_address: Address,
-    /// Administrator authorized to update maturity
-    pub admin: Address,
     /// Total amount in smallest unit (e.g. stroops for XLM)
     pub amount: i128,
 
@@ -235,22 +233,21 @@ impl LiquifactEscrow {
         admin: Address,
         invoice_id: Symbol,
         sme_address: Address,
-        admin: Address,
         amount: i128,
-        yield_bps: u32,
+        yield_bps: i64,
         maturity: u64,
-        funding_deadline: u64, // NEW
     ) -> InvoiceEscrow {
         // Prevent re-initialization
         assert!(
-            !env.storage().instance().has(&DataKey::Escrow),
+            !env.storage().instance().has(&ESCROW_KEY),
             "Escrow already initialized"
         );
+
+        admin.require_auth();
         let escrow = InvoiceEscrow {
             invoice_id: invoice_id.clone(),
             admin: admin.clone(),
             sme_address: sme_address.clone(),
-            admin: admin.clone(),
             amount,
             funding_target: amount,
             funded_amount: 0,
@@ -342,19 +339,11 @@ impl LiquifactEscrow {
 
     /// Record investor funding. In production, this would be called with token transfer.
     pub fn fund(env: Env, investor: Address, amount: i128) -> InvoiceEscrow {
-    ///
-    /// # Authorization
-    /// Requires authorization from `investor`. Each investor authorizes their
-    /// own funding contribution, preventing third parties from funding on their behalf.
-    ///
-    /// # Panics
-    /// - If the escrow is not in the open (status = 0) state.
-    pub fn fund(env: Env, investor: Address, amount: i128) -> InvoiceEscrow {
         // Auth boundary: investor must authorize their own funding action.
         investor.require_auth();
 
         let mut escrow = Self::get_escrow(env.clone());
-        
+
         // Sanity Check: Reject zero or negative funding amounts
         assert!(amount > 0, "Funding amount must be positive");
         assert!(escrow.status == 0, "Escrow not open for funding");
@@ -376,35 +365,14 @@ impl LiquifactEscrow {
             amount,
             funded_amount: escrow.funded_amount,
             status: escrow.status,
+            is_paid: false,
         }
         .publish(&env);
 
         escrow
     }
 
-    pub fn settle(env: Env) -> InvoiceEscrow {
-        let mut escrow = Self::get_escrow(env.clone());
-
-        // check expiry
-        Self::check_and_update_expiry(&env, &mut escrow);
-
-        assert!(escrow.status == 1, "Escrow must be funded");
-    /// Mark escrow as settled (buyer paid). Releases principal + yield to investors.
-    ///
-    /// This is the final step in the escrow lifecycle. It requires that:
-    /// 1. The escrow is fully funded (status = 1).
-    /// 2. The buyer has explicitly confirmed payment via `confirm_payment`.
-    /// 3. The SME (payee) authorizes the settlement.
-    ///
-    /// # Authorization
-    /// Requires authorization from the `sme_address` stored in the escrow.
-    /// Only the SME that is the beneficiary of the escrow may trigger settlement,
-    /// preventing unauthorized state transitions to the settled state.
-    ///
-    /// # Panics
-    /// - If the escrow is not in the funded (status = 1) state.
-    /// - If the buyer has not confirmed the payment yet.
-    pub fn settle(env: Env) -> InvoiceEscrow {
+    pub fn settle(env: Env, amount: i128) -> InvoiceEscrow {
         let mut escrow = Self::get_escrow(env.clone());
 
         // Auth boundary: only the SME (payee) may settle the escrow.

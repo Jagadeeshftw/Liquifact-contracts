@@ -35,12 +35,39 @@ This repo contains the **escrow** contract that holds investor funds for tokeniz
 
 ### 3. Replay / Double Execution
 
-```bash
-git clone <this-repo-url>
-cd liquifact-contracts
-cargo build
-cargo test
-```
+**Risk:**
+- Duplicate submission of the same transaction (network retries, user double-clicks, backend retries).
+- Malicious callers repeatedly invoking state-changing methods to force unintended transitions or emit misleading events.
+
+**Impact:**
+- Double-counted funding if `fund` is replayed while open.
+- Double-withdrawal if `withdraw` is replayable.
+- Over-settlement / repeated settlement events if `settle` can be called repeatedly without bounds.
+
+**Mitigation (Current):**
+- **State-machine guards** prevent replays across state transitions.
+  - `init` is a one-time operation (`"Escrow already initialized"`).
+  - `fund` only succeeds when `status == 0` (open). Once funded (`status` flips to `1`), additional `fund` calls revert.
+  - `withdraw` only succeeds when `status == 1` and sets `status = 3` and `funded_amount = 0`, so subsequent `withdraw` calls revert.
+  - `settle(amount)` enforces `settled_amount <= total_due` and flips `status = 2` only when fully settled; any further positive `settle` that would exceed `total_due` reverts.
+- **Authorization boundaries** (Soroban `require_auth`) reduce third-party replay surfaces.
+  - `init`: `admin.require_auth()`
+  - `fund`: `investor.require_auth()`
+  - `withdraw` / `settle`: `sme_address.require_auth()`
+
+**Notable non-idempotency (by design):**
+- `fund` is intentionally non-idempotent while open (each call accumulates `funded_amount`). Off-chain callers must ensure they do not submit duplicates.
+- `settle(amount)` is intentionally non-idempotent during partial settlement. Off-chain callers must ensure they do not submit duplicates.
+
+**Test coverage:**
+- `escrow/src/test.rs` includes repeated-call tests verifying:
+  - `init` replay is rejected.
+  - `fund` replay after funded is rejected.
+  - `withdraw` replay is rejected.
+  - `settle` overpay replay after full settlement is rejected.
+
+**Tracking:**
+- This section and tests are intended to close **#31**.
 
 ---
 
