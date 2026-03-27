@@ -34,6 +34,15 @@ pub enum DataKey {
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    Escrow,
+    Version,
+    Contribution(Address),
+    Claimed(Address),
+}
+
 /// Full state of an invoice escrow persisted in contract storage.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,6 +311,7 @@ impl LiquifactEscrow {
     /// - If emergency mode is active.
     pub fn update_maturity(env: Env, new_maturity: u64) -> InvoiceEscrow {
         let mut escrow = Self::get_escrow(env.clone());
+        escrow.sme_address.require_auth();
 
         escrow.admin.require_auth();
 

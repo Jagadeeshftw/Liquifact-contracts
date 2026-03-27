@@ -27,6 +27,7 @@ contains the `escrow` contract crate and its supporting documentation.
 ### 2. Arithmetic Risks (Overflow / Underflow)
 
 **Risk:**
+
 - `funded_amount += amount` may overflow `i128`
 
 ---
@@ -144,7 +145,8 @@ Read-only methods (including `get_investor_position`) do not require auth, and r
 ## Contract lifecycle
 
 ## Funding Constraints
-- **Minimum Funding:** All funding amounts must be strictly greater than zero ($> 0$). 
+
+- **Minimum Funding:** All funding amounts must be strictly greater than zero ($> 0$).
 - **Initialization:** Escrow creation will fail if the target amount is not positive.
 - **Integer Safety:** Uses `checked_add` to prevent overflow during funded amount accounting.
 - **Governance Controls (Target Update):** The funding target size (`amount`) can be modified by the initialized `admin`. It enforces strict governance constraints: it can only be modified when the escrow is `Open` (status = 0), the new target must be strictly positive, and it can never be less than the existing `funded_amount`.
