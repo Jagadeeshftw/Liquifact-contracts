@@ -10,16 +10,25 @@ This repo contains the **escrow** contract that holds investor funds for tokeniz
 ### 1. Unauthorized Access
 
 **Risk:**
+
 - Anyone can call `fund` or `settle`
 
 **Impact:**
+
 - Malicious settlement
 - Fake funding events
 
 **Mitigation (Current):**
-- None (mock auth used in tests)
+
+- **Authorization enforced**:
+  - `fund`: investor `require_auth`
+  - `settle`: admin `require_auth`
+  - `claim`: investor `require_auth`
+  - `withdraw`: SME `require_auth`
+  - `update_maturity`: admin `require_auth`
 
 **Recommended Controls:**
+
 - Require auth:
   - `fund`: investor must authorize
   - `settle`: only trusted role (e.g. admin/oracle)
@@ -29,6 +38,7 @@ This repo contains the **escrow** contract that holds investor funds for tokeniz
 ### 2. Arithmetic Risks (Overflow / Underflow)
 
 **Risk:**
+
 - `funded_amount += amount` may overflow `i128`
 
 ---
@@ -47,12 +57,13 @@ cargo test
 ### 5. Invalid Input / Economic Attacks
 
 **Risks:**
+
 - Negative funding
 - Zero funding
 - Invalid maturity
 
 | Command                | Description                                                |
-|------------------------|------------------------------------------------------------|
+| ---------------------- | ---------------------------------------------------------- |
 | `cargo build`          | Build all contracts                                        |
 | `cargo test`           | Run unit tests and property-based tests (using `proptest`) |
 | `cargo fmt`            | Format code                                                |
@@ -90,7 +101,7 @@ Records an investor contribution. Transitions to `status = 1` when
 **Parameters**
 
 | Parameter   | Constraints                                  |
-|-------------|----------------------------------------------|
+| ----------- | -------------------------------------------- |
 | `_investor` | Investor's Stellar address (for audit trail) |
 | `amount`    | > 0 recommended; partial funding is allowed  |
 
@@ -99,7 +110,7 @@ Records an investor contribution. Transitions to `status = 1` when
 **Failure conditions**
 
 | Condition                 | Behaviour                               |
-|---------------------------|-----------------------------------------|
+| ------------------------- | --------------------------------------- |
 | `status != 0`             | Panics: `"Escrow not open for funding"` |
 | `init` not called         | Panics: `"Escrow not initialized"`      |
 | `funded_amount` overflows | Rust panics (debug) / wraps (release)   |
@@ -111,20 +122,22 @@ Records an investor contribution. Transitions to `status = 1` when
 - **get_version** — Return the stored schema version number.
 - **fund** — Record investor funding; status becomes "funded" when target is met.
 - **settle** — Mark escrow as settled (buyer paid; investors receive principal + yield).
-- **migrate** — Upgrade storage from an older schema version to the current one (see below).
+- **claim** — Investor redeems their share of the settled funds. (NEW)
+- **withdraw** — SME withdraws the funded principal.
+- **migrate** — Upgrade storage from an older schema version to the current one.
 
 ### Edge-case test matrix (`escrow/src/test.rs`)
 
 Tests are tagged by risk category in inline comments:
 
-| Category  | Tag       | What is covered |
-|-----------|-----------|-----------------|
-| Happy path | `[HAPPY]` | Full lifecycle, field persistence, `get_escrow` consistency |
-| Auth       | `[AUTH]`  | `require_auth` recorded for admin / investor / SME; panics without auth |
-| State      | `[STATE]` | Double-init, fund-after-funded, fund-after-settled, settle-when-open, double-settle |
-| Uninitialized | `[UNINIT]` | `get_escrow`, `fund`, `settle` all panic before `init` |
-| Boundary   | `[BOUND]` | `amount=1`, `amount=i128::MAX`, `yield_bps=i64::MAX`, `maturity=0`, `maturity=u64::MAX`, overshoot funding, exact-boundary funding |
-| Repeated calls | `[REPEAT]` | Multiple investors accumulate correctly; `get_escrow` is idempotent |
+| Category       | Tag        | What is covered                                                                                                                    |
+| -------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Happy path     | `[HAPPY]`  | Full lifecycle, field persistence, `get_escrow` consistency                                                                        |
+| Auth           | `[AUTH]`   | `require_auth` recorded for admin / investor / SME; panics without auth                                                            |
+| State          | `[STATE]`  | Double-init, fund-after-funded, fund-after-settled, settle-when-open, double-settle                                                |
+| Uninitialized  | `[UNINIT]` | `get_escrow`, `fund`, `settle` all panic before `init`                                                                             |
+| Boundary       | `[BOUND]`  | `amount=1`, `amount=i128::MAX`, `yield_bps=i64::MAX`, `maturity=0`, `maturity=u64::MAX`, overshoot funding, exact-boundary funding |
+| Repeated calls | `[REPEAT]` | Multiple investors accumulate correctly; `get_escrow` is idempotent                                                                |
 
 ---
 
@@ -138,8 +151,8 @@ Any change to the struct layout (adding, removing, or retyping a field) is a **b
 
 ### Version history
 
-| Version | Description |
-|---------|-------------|
+| Version | Description                                                                                                                             |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | 1       | Initial schema — `invoice_id`, `sme_address`, `amount`, `funding_target`, `funded_amount`, `yield_bps`, `maturity`, `status`, `version` |
 
 ### How versioning works
@@ -181,6 +194,7 @@ Any change to the struct layout (adding, removing, or retyping a field) is a **b
 ```
 
 The contract rejects `migrate` calls that:
+
 - Pass a `from_version` that does not match the stored version (prevents accidental double-migration).
 - Pass a `from_version >= SCHEMA_VERSION` (already up to date).
 
@@ -193,17 +207,22 @@ The contract rejects `migrate` calls that:
 
 ---
 
-## Security & Authorization
+Currently, the contract methods (`init`, `fund`, `settle`, `claim`, `withdraw`) **enforce strict authorization** via `require_auth()`. This prevents unauthorized callers from performing state-altering actions on the escrow.
 
-Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce authorization** via `require_auth()`. They rely solely on state-machine guards (e.g. checking if `status == 0` before funding).
+### Double-Claim Protection
 
-> **Warning:** This represents an authentication gap. Any caller can trigger these functions. Negative tests have been added to track this gap and ensure proper exceptions are thrown when the contract is in an invalid state.
+The contract implements **Double-Claim Protection** for investor payouts. When an investor calls `claim()`:
+
+1. It verifies the escrow is in the `Settled` (status = 2) state.
+2. It checks for a `Claimed` flag for that specific investor in storage.
+3. If not already claimed, it calculates the payout amount (principal + yield) and marks the investor as `Claimed`.
+4. Subsequent calls to `claim()` by the same investor will fail.
 
 ---
 
-
 ## Funding Constraints
-- **Minimum Funding:** All funding amounts must be strictly greater than zero ($> 0$). 
+
+- **Minimum Funding:** All funding amounts must be strictly greater than zero ($> 0$).
 - **Initialization:** Escrow creation will fail if the target amount is not positive.
 - **Integer Safety:** Uses `checked_add` to prevent overflow during funded amount accounting.
 
@@ -226,12 +245,12 @@ Currently, the contract methods (`init`, `fund`, `settle`) **do not enforce auth
 - `funded_amount <= funding_target` (soft enforced)
 - `status transitions`: 0 → 1 → 2
 - Cannot settle before funded
-| Step | Command | Fails if… |
-|------|---------|-----------|
-| Format | `cargo fmt --all -- --check` | any file is not formatted |
-| Build | `cargo build` | compilation error |
-| Tests | `cargo test` | any test fails |
-| Coverage | `cargo llvm-cov --features testutils --fail-under-lines 95` | line coverage < 95 % |
+  | Step | Command | Fails if… |
+  |------|---------|-----------|
+  | Format | `cargo fmt --all -- --check` | any file is not formatted |
+  | Build | `cargo build` | compilation error |
+  | Tests | `cargo test` | any test fails |
+  | Coverage | `cargo llvm-cov --features testutils --fail-under-lines 95` | line coverage < 95 % |
 
 ### Coverage gate
 
